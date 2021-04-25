@@ -16,8 +16,8 @@ Codec之Gob实现
 type GobCodec struct {
 	conn io.ReadWriteCloser
 	buf  *bufio.Writer // buf 是为了防止阻塞而创建的带缓冲的 Writer，一般这么做能提升性能。
-	dec  *gob.Decoder
-	enc  *gob.Encoder
+	dec  *gob.Decoder // 用于从 conn 中读取数据，进行解码
+	enc  *gob.Encoder // 用于往 conn 中写入数据，编码后的数据
 }
 
 var _ Codec = (*GobCodec)(nil)
@@ -38,7 +38,7 @@ func (c *GobCodec) ReadHeader(h *Header) error {
 	return c.dec.Decode(h)
 }
 
-// ReadBody 从c.conn中读取数据并解码为body
+// ReadBody 从c.conn中读取数据并解码为body，在这里是解析返回的reply
 func (c *GobCodec) ReadBody(body interface{}) error {
 	return c.dec.Decode(body)
 }

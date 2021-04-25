@@ -130,6 +130,7 @@ func (client *Client) send(call *Call) {
 	}
 }
 
+// 读取返回结果，可并发，通过header.Seq确定是哪个 Call，而每个Call是一次独立的rpc
 func (client *Client) receive() {
 	var err error
 	for err == nil {
