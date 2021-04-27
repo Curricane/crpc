@@ -2,10 +2,11 @@ package crpc
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
 	"net"
 	"reflect"
+	"strings"
 	"sync"
 
 	"github.com/Curricane/crpc/codec"
@@ -35,7 +36,9 @@ var DefaultOption = &Option{
 }
 
 // Server represents an RPC Server.
-type Server struct{}
+type Server struct {
+	serviceMap sync.Map
+}
 
 // NewServer returns a new Server.
 func NewServer() *Server {
@@ -44,6 +47,19 @@ func NewServer() *Server {
 
 // DefaultServer is the default instance of *Server.
 var DefaultServer = NewServer()
+
+func Register(rcvr interface{}) error {
+	return DefaultServer.Register(rcvr)
+}
+
+// Register publishes in the server the set of methods
+func (server *Server) Register(rcvr interface{}) error {
+	s := newService(rcvr)
+	if _, dup := server.serviceMap.LoadOrStore(s.name, s); dup {
+		return errors.New("rpc: sercie already defined: " + s.name)
+	}
+	return nil
+}
 
 // ServeConn runs the server on a single connection.
 // ServeConn blocks, serving the connection until the client hangs up.
@@ -106,6 +122,8 @@ func (server *Server) serverCodec(cc codec.Codec) {
 type request struct {
 	h            *codec.Header // header of request
 	argv, replyv reflect.Value // argv and replyv of request
+	mtype        *methodType
+	svc          *service
 }
 
 func (server *Server) readRequest(cc codec.Codec) (*request, error) {
@@ -114,12 +132,22 @@ func (server *Server) readRequest(cc codec.Codec) (*request, error) {
 		return nil, err
 	}
 	req := &request{h: h}
-
-	// TODO: now we don't know the type of request argv
-	// part1, just suppose it's string
-	req.argv = reflect.New(reflect.TypeOf(""))
-	if err = cc.ReadBody(req.argv.Interface()); err != nil {
-		log.Errorf("rpc server: read argv err:", err)
+	req.svc, req.mtype, err = server.findService(h.ServiceMethod)
+	if err != nil {
+		return req, err
+	}
+	
+	req.argv = req.mtype.newArgv()
+	req.replyv = req.mtype.newReplyv()
+	
+	// make sure that argvi is a pointer, ReadBody need a pointer as parameter
+	argvi := req.argv.Interface()
+	if req.argv.Type().Kind() != reflect.Ptr {
+		argvi = req.argv.Addr().Interface()
+	}
+	if err = cc.ReadBody(argvi); err != nil {
+		log.Errorf("rpc server: read body err:", err)
+		return req, err
 	}
 	return req, nil
 }
@@ -144,12 +172,16 @@ func (server *Server) sendResponse(cc codec.Codec, h *codec.Header, body interfa
 }
 
 func (server *Server) handleRequest(cc codec.Codec, req *request, sending *sync.Mutex, wg *sync.WaitGroup) {
-	// TODO, should call registered rpc methods to get the right replyv
 	// day 1, just print argv and send a hello message
 	defer wg.Done()
-	log.Info(req.h, req.argv.Elem())
-	req.replyv = reflect.ValueOf(fmt.Sprintf("crpc resp %d", req.h.Seq))
+	err := req.svc.call(req.mtype, req.argv, req.replyv)
+	if err != nil {
+		req.h.Error = err.Error()
+		server.sendResponse(cc, req.h, invalidRequest, sending)
+		return
+	}
 	server.sendResponse(cc, req.h, req.replyv.Interface(), sending)
+	return
 }
 
 // Accept accepts connections on the listener and serves requests
@@ -163,6 +195,29 @@ func (server *Server) Accept(lis net.Listener) {
 		}
 		go server.ServeConn(conn)
 	}
+}
+
+func (server *Server) findService(serviceMethod string) (svc *service, mtype *methodType, err error) {
+	dot := strings.LastIndex(serviceMethod, ".")
+	if dot < 0 {
+		err = errors.New("rpc server: service/method request ill-formed: " + serviceMethod)
+		return
+	}
+	serviceName, methodName := serviceMethod[:dot], serviceMethod[dot+1:]
+	svci, ok := server.serviceMap.Load(serviceName)
+	if !ok {
+		err = errors.New("rpc server: can't find service " + serviceName)
+		return
+	}
+	
+	svc = svci.(*service)
+	
+	mtype = svc.method[methodName]
+	if mtype == nil {
+		err = errors.New("rpc server: can't find method " + methodName)
+	}
+	
+	return
 }
 
 // Accept accepts connections on the listener and serves requests
